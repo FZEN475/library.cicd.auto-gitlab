@@ -1,0 +1,61 @@
+# templates/auto-release/template.yml
+spec:
+  inputs:
+    auto-release:
+      description: "Auto release after merge"
+      type: boolean
+      default: true
+    job-prefix:
+      description: "Job prefix"
+      type: string
+      default: "-$CI_PROJECT_ID-$CI_COMMIT_SHORT_SHA"
+---
+include:
+  - local: templates/auto-core/template.yml
+    
+stages:
+  - auto-gitlab
+
+.auto-gitlab:auto-release:public:rules-extends:
+  - when: on_success
+
+.auto-gitlab:auto-release:public:RELEASE-md:
+  - |-
+    true
+
+.auto-gitlab:auto-release:public:links-json:
+  - |-
+    true
+
+"auto-gitlab:auto-release:core$[[ inputs.job-prefix | expand_vars ]]":
+  stage: auto-gitlab
+  image: registry.gitlab.com/gitlab-org/cli:latest
+  extends:
+    - .utils:toolkit:shared:package-cache
+  needs:
+    - !reference [ .auto-gitlab:auto-core:public:needs ]
+  before_script:
+    - !reference [ .utils:toolkit:shared:install-utility ]
+    - !reference [ .auto-gitlab:auto-release:public:RELEASE-md ]
+    - !reference [ .auto-gitlab:auto-release:public:links-json ]
+    - !reference [ .auto-gitlab:auto-core:shared:auth ]
+  script:
+    - |
+      set -- glab release create "$CI_COMMIT_TAG"
+      
+      if [ -f "RELEASE.md" ]; then
+        set -- "$@" -F RELEASE.md
+      fi
+      
+      if [ -f "assets-links.json" ] && [ -s "assets-links.json" ]; then
+        assets_links=$(cat assets-links.json)
+        set -- "$@" --assets-links "$assets_links"
+      fi
+
+      "$@"
+
+  rules:
+    - !reference [ .utils:toolkit:shared:tagged, only ]
+    - if: '"$[[ inputs.auto-release ]]" != "true"'
+      when: never
+    - !reference [ .auto-gitlab:auto-release:public:rules-extends ]

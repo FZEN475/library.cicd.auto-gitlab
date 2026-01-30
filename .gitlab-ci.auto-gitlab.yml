@@ -1,0 +1,79 @@
+
+include:
+  - local: templates/auto-approve/template.yml
+  - local: templates/auto-rebase/template.yml
+  - local: templates/auto-merge/template.yml
+    inputs:
+      auto-remove-source-branch: true
+  - local: templates/auto-tag/template.yml
+    inputs:
+      auto-tag: true
+      auto-tag-version-major: 0
+      auto-tag-version-minor: 9
+  - local: templates/auto-release/template.yml
+
+stages:
+  - auto-gitlab
+
+.auto-gitlab:auto-release:public:RELEASE-md:
+  - |-
+    cat > RELEASE.md <<EOF
+    # Release ${CI_COMMIT_TAG}
+
+    ## Информация о релизе
+
+    - **Проект:** ${CI_PROJECT_PATH}
+    - **Pipeline ID:** ${CI_PIPELINE_ID}
+    - **Job ID:** ${CI_JOB_ID}
+    - **Commit SHA:** ${CI_COMMIT_SHA}
+    - **Short SHA:** ${CI_COMMIT_SHORT_SHA}
+    - **Ветка:** ${CI_COMMIT_REF_NAME}
+    - **Тег:** ${CI_COMMIT_TAG}
+    - **Автор коммита:** ${GITLAB_USER_NAME}
+    - **Дата сборки:** ${CI_JOB_STARTED_AT}
+
+    ## Изменения
+
+    Релиз создан автоматически через GitLab CI/CD.
+
+    ## Ссылки
+
+    - [Pipeline](${CI_PIPELINE_URL})
+    - [Job](${CI_JOB_URL})
+    - [Project](${CI_PROJECT_URL})
+    - [Repository](${CI_PROJECT_URL}/-/tree/${CI_COMMIT_TAG})
+
+    ## Артефакты
+
+    Если pipeline публикует артефакты, они доступны во вкладке Jobs / Artifacts.
+
+    ## Использование
+
+    Создано командой:
+
+    \`\`\`bash
+    glab release create "\$CI_COMMIT_TAG" -F RELEASE.md --assets-links assets_links.json
+    \`\`\`
+    EOF
+
+.auto-gitlab:auto-release:public:links-json:
+  - |-
+    jq -n \
+      --arg tag "$TAG" \
+      --arg api "${CI_API_V4_URL}" \
+      --arg project_id "${CI_PROJECT_ID}" \
+      --arg project_url "${CI_PROJECT_URL}" \
+      '[
+        {
+          name: ("file-" + $tag + ".txt"),
+          direct_asset_path: "/file.txt",
+          link_type: "other",
+          url: ($api + "/projects/" + $project_id + "/packages/generic/example/" + $tag + "/file.txt")
+        },
+        {
+          name: "file-latest.txt",
+          direct_asset_path: "/file-latest.txt",
+          link_type: "other",
+          url: ($project_url + "/-/releases/permalink/latest/downloads/file.txt")
+        }
+      ]' > assets-links.json

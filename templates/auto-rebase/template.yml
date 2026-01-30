@@ -1,0 +1,119 @@
+# templates/auto-rebase/template.yml
+spec:
+  inputs:
+    auto-rebase:
+      description: "Auto rebase source branch"
+      type: boolean
+      default: true
+    job-prefix:
+      description: "Job prefix"
+      type: string
+      default: "-$CI_PROJECT_ID-$CI_COMMIT_SHORT_SHA"
+      
+---
+include:
+  - local: templates/auto-core/template.yml
+
+stages:
+  - auto-gitlab
+
+.auto-gitlab:auto-rebase:public:rules-extends:
+  - when: on_success
+
+.auto-gitlab:auto-rebase:internal:api-rebase: |
+  rebase_merge_request() {
+      local token="${1:?Не передан токен авторизации}"
+      local iid="${2:?Не передан IID merge request}"
+      local timeout="${3:-60}"   # максимальное время ожидания в секундах
+      local interval=5            # интервал между проверками
+
+      # Проверка обязательных переменных CI
+      : "${CI_API_V4_URL:?Не задана переменная CI_API_V4_URL}"
+      : "${CI_PROJECT_ID:?Не задана переменная CI_PROJECT_ID}"
+
+      REBASE_JSON=$(jq -n \
+          '{
+            "skip_ci": true
+          }'
+      )
+
+      local api_url="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${iid}/rebase"
+
+      # Запускаем rebase
+      log_info "Запуск rebase для MR IID=${iid}..."
+      rebase_info=$(curl -f -X PUT \
+          -H "Authorization: Bearer ${token}" \
+          -H "Content-Type: application/json" \
+          -d "${REBASE_JSON}" \
+          "${api_url}" || fail "Не удалось запустить rebase для MR IID=${iid}")
+
+      log_info "$rebase_info"
+  
+      log_info "Rebase запущен, ожидаем завершения..."
+
+      local elapsed=0
+      while [ "$elapsed" -lt "$timeout" ]; do
+          local local_result
+          local in_progress
+          local merge_error
+
+          local_result=$(curl -s -X GET \
+            -H "Authorization: Bearer ${token}" \
+            --data-urlencode "include_rebase_in_progress=true" \
+            "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${iid}")
+
+          log_info "$local_result"
+
+          in_progress=$(echo "$local_result" | jq -r '.rebase_in_progress')
+          merge_error=$(echo "$local_result" | jq -r '.merge_error')
+
+          if [[ "$in_progress" == "false" ]]; then
+              if [[ "$merge_error" != "null" ]]; then
+                  fail "Rebase для MR IID=${iid} завершился с ошибкой: $merge_error"
+              else
+                  log_info "Rebase для MR IID=${iid} завершен успешно."
+                  return 0
+              fi
+          fi
+
+          sleep $interval
+          elapsed=$((elapsed + interval))
+      done
+
+      fail "Rebase для MR IID=${iid} не завершился за ${timeout} секунд."
+  }
+
+"auto-gitlab:auto-rebase:core$[[ inputs.job-prefix | expand_vars ]]":
+  stage: auto-gitlab
+  extends:
+    - .utils:toolkit:shared:package-cache
+  needs:
+    - job: "auto-gitlab:auto-approve:core$[[ inputs.job-prefix | expand_vars ]]"
+      optional: true
+    - !reference [ .auto-gitlab:auto-core:public:needs ]
+  before_script:
+    - !reference [ .utils:toolkit:shared:install-utility ]
+    - !reference [ .auto-gitlab:auto-core:shared:api-mr-list ]
+    - !reference [ .auto-gitlab:auto-rebase:internal:api-rebase ]
+  script:
+    - |
+      mr_iids=$(get_open_merge_requests "$AUTO_GITLAB_TOKEN" | jq -r '.[].iid')
+      if [[ -z "$mr_iids" ]]; then
+          log_info "Нет открытых merge requests для ветки ${CI_COMMIT_REF_NAME}."
+          exit 0
+      fi
+      for iid in $mr_iids; do
+          rebase_merge_request "$AUTO_GITLAB_TOKEN" "$iid"
+      done
+  rules:
+    - !reference [ .utils:toolkit:shared:tagged, not ]
+    - !reference [ .utils:toolkit:shared:source, only_merge ]
+    - if: '"$[[ inputs.auto-rebase ]]" == "true"'
+      when: never
+    - !reference [ .auto-gitlab:auto-rebase:public:rules-extends ]
+
+
+
+
+
+

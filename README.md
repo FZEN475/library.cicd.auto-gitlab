@@ -1,93 +1,213 @@
-# auto-release
+# auto-gitlab
 
+Набор модулей для автоматизации процессов gitlab ci
 
+### Usage
 
-## Getting started
+```yaml
+include:
+  - local: templates/auto-approve/template.yml
+  - local: templates/auto-rebase/template.yml
+  - local: templates/auto-merge/template.yml
+    inputs:
+      auto-remove-source-branch: true
+  - local: templates/auto-tag/template.yml
+    inputs:
+      auto-tag: true
+      auto-tag-version-major: 0
+      auto-tag-version-minor: 4
+  - local: templates/auto-release/template.yml
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+stages:
+  - auto-gitlab
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+.auto-gitlab:auto-release:public:RELEASE-md:
+  - |
+    cat > RELEASE.md <<EOF
+    ### TEST
+    EOF
 
-## Add your files
-
-* [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
-
+.auto-gitlab:auto-release:public:links-json:
+  - |
+    jq -n \
+      --arg tag "$TAG" \
+      --arg api "${CI_API_V4_URL}" \
+      --arg project_id "${CI_PROJECT_ID}" \
+      --arg project_url "${CI_PROJECT_URL}" \
+      '[
+        {
+          name: ("file-" + $tag + ".txt"),
+          direct_asset_path: "/file.txt",
+          link_type: "other",
+          url: ($api + "/projects/" + $project_id + "/packages/generic/example/" + $tag + "/file.txt")
+        },
+        {
+          name: "file-latest.txt",
+          direct_asset_path: "/file-latest.txt",
+          link_type: "other",
+          url: ($project_url + "/-/releases/permalink/latest/downloads/file.txt")
+        }
+      ]' > assets-links.json
 ```
-cd existing_repo
-git remote add origin https://gitlab.fizn.ru/library/cicd/auto-release.git
-git branch -M main
-git push -uf origin main
+
+
+### pipline
+
+```mermaid
+journey
+    section auto-gitlab
+        auto-approve: 9: MR
+        auto-rebase: 9: MR
+        auto-merge: 9: MR
+    section auto-gitlab
+        auto-tag: 9: TAG
+    section auto-gitlab
+        auto-release: 9: MAIN
 ```
 
-## Integrate with your tools
+### Общие свойства
 
-* [Set up project integrations](https://gitlab.fizn.ru/library/cicd/auto-release/-/settings/integrations)
+- stage: `auto-gitlab`
+- Название job формируются с префиксом `$[[ inputs.job-prefix | expand_vars ]]`
+- Установка зависимости от стороннего job:
+  ```yaml
+  .auto-gitlab:auto-core:public:needs:
+    - job: some-job
+  ```
+- Права на все действия с повышенными правами берутся из jwt-токена CI-variable `$AUTO_GITLAB_TOKEN`
+  - approve
+  - rebase
+  - MR
+  - tag
 
-## Collaborate with your team
+### auto-approve (= нарушение регламента =)
 
-* [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+- Автоматическое одобрение MR при помощи токена
+- Условия
+  ```yaml
+  "auto-gitlab:auto-approve:core$[[ inputs.job-prefix | expand_vars ]]":
+    rules:
+      - !reference [ .utils:toolkit:shared:tagged, not ]
+      - !reference [ .utils:toolkit:shared:source, only_merge ]
+      - if: '"$[[ inputs.auto-approve ]]" == "true"'
+        when: never
+      - !reference [ .auto-gitlab:auto-approve:public:rules-extends ]
 
-## Test and Deploy
+  .auto-gitlab:auto-approve:public:rules-extends:
+    - when: on_success
+  ```
 
-Use the built-in continuous integration in GitLab.
+### auto-rebase
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+- Переброс коммитов текущей ветки в конец ветки приёмника.  
+- Может быть обязательным требованием для MR.
+- Условия
+  ```yaml
+  "auto-gitlab:auto-rebase:core$[[ inputs.job-prefix | expand_vars ]]":
+    rules:
+      - !reference [ .utils:toolkit:shared:tagged, not ]
+      - !reference [ .utils:toolkit:shared:source, only_merge ]
+      - if: '"$[[ inputs.auto-rebase ]]" == "true"'
+        when: never
+      - !reference [ .auto-gitlab:auto-rebase:public:rules-extends ]
+  .auto-gitlab:auto-rebase:public:rules-extends:
+    - when: on_success
+  ```
 
-***
+### auto-merge (= нарушение регламента =)
 
-# Editing this README
+- Применение MR
+- inputs
+```yaml
+  inputs:
+    auto-remove-source-branch:
+      description: "Auto remove source branch after merge"
+      type: boolean
+      default: false
+```
+- Условия
+  ```yaml
+  "auto-gitlab:auto-merge:core$[[ inputs.job-prefix | expand_vars ]]":
+    rules:
+      - !reference [ .utils:toolkit:shared:tagged, not ]
+      - !reference [ .utils:toolkit:shared:source, only_merge ]
+      - if: '"$[[ inputs.auto-merge ]]" != "true"'
+        when: never
+      - !reference [ .auto-gitlab:auto-merge:public:rules-extends ]
+  .auto-gitlab:auto-merge:public:rules-extends:
+    - when: on_success
+  ```
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+### auto-tag (= нарушение регламента =)
 
-## Suggestions for a good README
+- Каждый commit в main cоздает tag с увеличенным на 1 номером patch
+- inputs
+```yaml
+  inputs:
+    auto-tag-version-prefix:
+      description: "Prefix for autogenerated tag"
+      type: string
+      default: ""
+    auto-tag-version-major:
+      type: string
+      default: "0"
+    auto-tag-version-minor:
+      type: string
+      default: "0" 
+```
+- Условия
+```yaml
+"auto-gitlab:auto-create-TAG:core$[[ inputs.job-prefix | expand_vars ]]":
+  rules:
+    - !reference [ .utils:toolkit:shared:tagged, not ]
+    - if: '"$[[ inputs.auto-tag ]]" != "true"'
+      when: never
+    - !reference [ .auto-gitlab:auto-tag:public:rules-extends ]
+.auto-gitlab:auto-tag:public:rules-extends:
+  - !reference [ .utils:toolkit:shared:default-branch, only ]
+  - when: on_success
+```
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+### auto-release
 
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+- Создаёт релиз при создании tag.
+- Добавление текста релиза:
+```yaml
+.auto-gitlab:auto-release:public:RELEASE-md:
+  - echo "## TEST" > RELEASE.md
+```
+Добавление ссылок на файлы:
+```yaml
+.auto-gitlab:auto-release:public:links-json:
+  - |
+    jq -n \
+      --arg tag "$TAG" \
+      --arg api "${CI_API_V4_URL}" \
+      --arg project_id "${CI_PROJECT_ID}" \
+      --arg project_url "${CI_PROJECT_URL}" \
+      '[
+        {
+          name: ("file-" + $tag + ".txt"),
+          direct_asset_path: "/file.txt",
+          link_type: "other",
+          url: ($api + "/projects/" + $project_id + "/packages/generic/example/" + $tag + "/file.txt")
+        },
+        {
+          name: "file-latest.txt",
+          direct_asset_path: "/file-latest.txt",
+          link_type: "other",
+          url: ($project_url + "/-/releases/permalink/latest/downloads/file.txt")
+        }
+      ]' > assets-links.json
+```
+- Условия
+```yaml
+"auto-gitlab:auto-release:core$[[ inputs.job-prefix | expand_vars ]]":
+  rules:
+    - !reference [ .utils:toolkit:shared:tagged, only ]
+    - if: '"$[[ inputs.auto-release ]]" != "true"'
+      when: never
+    - !reference [ .auto-gitlab:auto-release:public:rules-extends ]
+.auto-gitlab:auto-release:public:rules-extends:
+  - when: on_success
+```
