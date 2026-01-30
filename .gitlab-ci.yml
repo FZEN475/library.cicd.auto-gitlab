@@ -1,0 +1,8 @@
+
+include:
+  - local: '.gitlab-ci.auto-gitlab.yml'
+
+variables:
+  CI_DEBUG_TRACE: "true"
+
+  

@@ -1,0 +1,175 @@
+# templates/auto-merge/template.yml
+spec:
+  inputs:
+    auto-merge:
+      description: "Auto confirm merge request"
+      type: boolean
+      default: true
+    auto-remove-source-branch:
+      description: "Auto remove source branch after merge"
+      type: boolean
+      default: false
+    job-prefix:
+      description: "Job prefix"
+      type: string
+      default: "-$CI_PROJECT_ID-$CI_COMMIT_SHORT_SHA"
+      
+---
+
+include:
+  - local: templates/auto-core/template.yml
+
+stages:
+  - auto-gitlab
+
+variables:
+  AUTO_REMOVE_SOURCE_BRANCH: $[[ inputs.auto-remove-source-branch ]]
+
+.auto-gitlab:auto-merge:public:rules-extends:
+  - when: on_success
+
+.auto-gitlab:auto-merge:internal:api-merge: |
+
+  create_merge_request() {
+    local token="${1:?Не передан токен авторизации}"
+    local target_branch="${2:-$CI_DEFAULT_BRANCH}"
+    local title="${3:-Автоматический merge request от CI}"
+  
+    # Проверка обязательных переменных CI
+    : "${CI_API_V4_URL:?Не задана переменная CI_API_V4_URL}"
+    : "${CI_PROJECT_ID:?Не задана переменная CI_PROJECT_ID}"
+    : "${CI_COMMIT_REF_NAME:?Не задана переменная CI_COMMIT_REF_NAME}"
+    : "${target_branch:?Не задана целевая ветка и CI_DEFAULT_BRANCH пуст}"
+  
+    CREATE_MERGE_JSON=$(jq -n \
+        --arg source_branch "${CI_COMMIT_REF_NAME}" \
+        --arg target_branch "${target_branch}" \
+        --arg title "${title}" \
+        '{source_branch: $source_branch, target_branch: $target_branch, squash: true, title: $title }'
+    )
+  
+    # Выполним запрос на создание MR
+    curl -f -X POST \
+      -H "Authorization: Bearer ${token}" \
+      -H "Content-Type: application/json" \
+      -d "${CREATE_MERGE_JSON}" \
+      "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests"
+  }
+
+  merge_merge_request() {
+      token="$1"
+      iid="$2"
+  
+      if [ -z "$token" ]; then
+          log_info "Не передан токен авторизации" >&2
+          return 1
+      fi
+      if [ -z "$iid" ]; then
+          log_info "Не передан ID Merge Request" >&2
+          return 1
+      fi
+  
+      if [ -z "$CI_API_V4_URL" ]; then
+          log_info "Не задана переменная CI_API_V4_URL" >&2
+          return 1
+      fi
+      if [ -z "$CI_PROJECT_ID" ]; then
+          log_info "Не задана переменная CI_PROJECT_ID" >&2
+          return 1
+      fi
+      if [ -z "$CI_COMMIT_MESSAGE" ]; then
+          log_info "Не задана переменная CI_COMMIT_MESSAGE" >&2
+          return 1
+      fi
+  
+      # Получаем информацию о текущем MR
+      MR_info=$(curl -s -f -X GET \
+          -H "Authorization: Bearer $token" \
+          "$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$iid") || return 1
+  
+      log_info "$MR_info"
+  
+      remove_branch="$AUTO_REMOVE_SOURCE_BRANCH"
+  
+      if [ "$CI_MERGE_REQUEST_SOURCE_BRANCH_PROTECTED" = "true" ]; then
+          log_info "Ветка защищена, принудительно отключаем удаление после merge"
+          remove_branch="false"
+      fi
+  
+      merge_status=$(echo "$MR_info" | jq -r '.merge_status')
+  
+      # Определяем, нужен ли auto_merge
+      auto_merge_json=""
+      if [ "$merge_status" = "checking" ]; then
+          auto_merge_json=", \"auto_merge\": true"
+      fi
+  
+      MERGE_MERGE_JSON=$(jq -n \
+          --arg remove_branch "$remove_branch" \
+          --arg auto_merge_strategy "merge_when_pipeline_succeeds" \
+          --arg squash_commit_message "$CI_COMMIT_MESSAGE" \
+          '{
+            should_remove_source_branch: ($remove_branch == "true"), 
+            auto_merge_strategy: $auto_merge_strategy, 
+            squash: true, 
+            squash_commit_message: $squash_commit_message
+          }')
+  
+      if [ -n "$auto_merge_json" ]; then
+          MERGE_MERGE_JSON=$(echo "$MERGE_MERGE_JSON" | jq '. + {auto_merge: true}')
+      fi
+  
+      # Первый merge
+      if ! curl -f -X PUT \
+          -H "Authorization: Bearer $token" \
+          -H "Content-Type: application/json" \
+          -d "$MERGE_MERGE_JSON" \
+          "$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$iid/merge"; then
+  
+          log_info "Первый merge не удался, пробуем повторно без auto_merge"
+  
+          # Убираем auto_merge
+          MERGE_MERGE_JSON_NO_AUTO=$(echo "$MERGE_MERGE_JSON" | jq 'del(.auto_merge)')
+  
+          curl -f -X PUT \
+            -H "Authorization: Bearer $token" \
+            -H "Content-Type: application/json" \
+            -d "$MERGE_MERGE_JSON_NO_AUTO" \
+            "$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$iid/merge"
+      fi
+  }
+  
+"auto-gitlab:auto-merge:core$[[ inputs.job-prefix | expand_vars ]]":
+  stage: auto-gitlab
+  retry:
+    max: 2
+    when: script_failure
+  extends:
+    - .utils:toolkit:shared:package-cache
+  needs:
+    - job: "auto-gitlab:auto-rebase:core$[[ inputs.job-prefix | expand_vars ]]"
+      optional: true
+    - job: "auto-gitlab:auto-approve:core$[[ inputs.job-prefix | expand_vars ]]"
+      optional: true
+    - !reference [ .auto-gitlab:auto-core:public:needs ]
+  before_script:
+    - !reference [ .utils:toolkit:shared:install-utility ]
+    - !reference [ .auto-gitlab:auto-core:shared:api-mr-list ]
+    - !reference [ .auto-gitlab:auto-merge:internal:api-merge ]
+  script:
+    - |
+      mr_iids=$(get_open_merge_requests "$AUTO_GITLAB_TOKEN" | jq -r '.[].iid')
+      if [[ -z "$mr_iids" ]]; then
+          log_info "Нет открытых merge requests для ветки ${CI_COMMIT_REF_NAME}."
+          exit 0
+      fi
+      for iid in $mr_iids; do
+          merge_merge_request "$AUTO_GITLAB_TOKEN" "$iid"
+      done
+  rules:
+    - !reference [ .utils:toolkit:shared:tagged, not ]
+    - !reference [ .utils:toolkit:shared:source, only_merge ]
+    - if: '"$[[ inputs.auto-merge ]]" != "true"'
+      when: never
+    - !reference [ .auto-gitlab:auto-merge:public:rules-extends ]
+

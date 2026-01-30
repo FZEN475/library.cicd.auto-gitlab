@@ -1,0 +1,64 @@
+# templates/auto-approve/template.yml
+spec:
+  inputs:
+    auto-approve:
+      description: "Auto approve merge request"
+      type: boolean
+      default: true
+    job-prefix:
+      description: "Job prefix"
+      type: string
+      default: "-$CI_PROJECT_ID-$CI_COMMIT_SHORT_SHA"
+
+---
+include:
+  - local: templates/auto-core/template.yml
+
+stages:
+  - auto-gitlab
+
+.auto-gitlab:auto-approve:public:rules-extends:
+  - when: on_success 
+
+.auto-gitlab:auto-approve:internal:api-approve: |
+
+  approve_merge_request() {
+      local token="${1:?Не передан токен авторизации}"
+      local iid="${2:?Не передан IID merge request}"
+
+      # Проверка обязательных переменных CI
+      : "${CI_API_V4_URL:?Не задана переменная CI_API_V4_URL}"
+      : "${CI_PROJECT_ID:?Не задана переменная CI_PROJECT_ID}"
+
+      # Выполним запрос на approve MR
+      curl -X POST \
+        -H "Authorization: Bearer ${token}" \
+        "${CI_API_V4_URL}/projects/$CI_PROJECT_ID/merge_requests/$iid/approve"
+  }
+  
+"auto-gitlab:auto-approve:core$[[ inputs.job-prefix | expand_vars ]]":
+  stage: auto-gitlab
+  extends:
+    - .utils:toolkit:shared:package-cache
+  needs:
+    - !reference [ .auto-gitlab:auto-core:public:needs ]
+  before_script:
+    - !reference [ .utils:toolkit:shared:install-utility ]
+    - !reference [ .auto-gitlab:auto-core:shared:api-mr-list ]
+    - !reference [ .auto-gitlab:auto-approve:internal:api-approve ]
+  script:
+    - |
+      mr_iids=$(get_open_merge_requests "$AUTO_GITLAB_TOKEN" | jq -r '.[].iid')
+      if [[ -z "$mr_iids" ]]; then
+          log_info "Нет открытых merge requests для ветки ${CI_COMMIT_REF_NAME}."
+          exit 0
+      fi
+      for iid in $mr_iids; do
+          approve_merge_request "$AUTO_GITLAB_TOKEN" "$iid"
+      done
+  rules:
+    - !reference [ .utils:toolkit:shared:tagged, not ]
+    - !reference [ .utils:toolkit:shared:source, only_merge ]
+    - if: '"$[[ inputs.auto-approve ]]" == "true"'
+      when: never
+    - !reference [ .auto-gitlab:auto-approve:public:rules-extends ]
