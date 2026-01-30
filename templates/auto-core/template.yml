@@ -1,0 +1,33 @@
+# templates/auto-core/template.yml
+include:
+  - component: $CI_SERVER_FQDN/library/cicd/utils/toolkit@main
+
+.auto-gitlab:auto-core:public:needs:
+  -
+
+.auto-gitlab:auto-core:shared:auth: |
+  export GITLAB_HOST=$CI_SERVER_HOST
+  export GITLAB_TOKEN=$AUTO_GITLAB_TOKEN
+  # glab auth login - не обязателен
+
+.auto-gitlab:auto-core:shared:api-mr-list: |
+  get_open_merge_requests() {
+      local token="${1:?Не передан токен авторизации}"
+
+      : "${CI_API_V4_URL:?Не задана переменная CI_API_V4_URL}"
+      : "${CI_PROJECT_ID:?Не задана переменная CI_PROJECT_ID}"
+      : "${CI_COMMIT_REF_NAME:?Не задана переменная CI_COMMIT_REF_NAME}"
+
+      mr_list=$(curl -s -f -X GET \
+        -H "Authorization: Bearer ${token}" \
+        --data-urlencode "state=opened" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests")
+  
+      filtered_mr=$(echo "$mr_list" | jq --arg branch "$CI_COMMIT_REF_NAME" '[.[] | select(.source_branch==$branch)]')
+
+      if [ -n "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" ]; then
+        filtered_mr=$(echo "$filtered_mr" | jq --arg target "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" '[.[] | select(.target_branch==$target)]')
+      fi
+
+      echo "$filtered_mr"
+  }
